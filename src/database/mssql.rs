@@ -2,6 +2,7 @@ use crate::get_or_null;
 
 use super::{ExecuteResult, Pool, TableRow, RECORDS_LIMIT_PER_PAGE};
 use async_trait::async_trait;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use database_tree::{Child, Database, Schema, Table};
 use futures::TryStreamExt;
 use itertools::Itertools;
@@ -440,6 +441,9 @@ fn convert_column_value_to_string(row: &MssqlRow, column: &MssqlColumn) -> anyho
         let value: Option<String> = value;
         Ok(value.unwrap_or_else(|| "NULL".to_string()))
     } else if let Ok(value) = row.try_get(column_name) {
+        let value: String = value;
+        Ok(value)
+    } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<i8> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
@@ -458,6 +462,27 @@ fn convert_column_value_to_string(row: &MssqlRow, column: &MssqlColumn) -> anyho
         let value: Option<f64> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<u8> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<rust_decimal::Decimal> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<NaiveDate> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<NaiveTime> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<NaiveDateTime> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<chrono::DateTime<chrono::Utc>> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<serde_json::Value> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get::<Option<bool>, _>(column_name) {
         let value: Option<bool> = value;
         Ok(get_or_null!(value))
     } else {
