@@ -2,21 +2,21 @@ use crate::get_or_null;
 
 use super::{ExecuteResult, Pool, TableRow, RECORDS_LIMIT_PER_PAGE};
 use async_trait::async_trait;
-use chrono::NaiveDateTime;
-use database_tree::{Child, Database, Table};
+use database_tree::{Child, Database, Schema, Table};
 use futures::TryStreamExt;
-use sqlx::sqlite::{SqliteColumn, SqlitePoolOptions, SqliteRow};
+use itertools::Itertools;
+use sqlx::mssql::{MssqlColumn, MssqlPoolOptions, MssqlRow};
 use sqlx::{Column as _, Row as _, TypeInfo as _};
 use std::time::Duration;
 
-pub struct SqlitePool {
-    pool: sqlx::sqlite::SqlitePool,
+pub struct MssqlPool {
+    pool: sqlx::mssql::MssqlPool,
 }
 
-impl SqlitePool {
+impl MssqlPool {
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            pool: SqlitePoolOptions::new()
+            pool: MssqlPoolOptions::new()
                 .acquire_timeout(Duration::from_secs(5))
                 .connect(database_url)
                 .await?,
@@ -27,24 +27,15 @@ impl SqlitePool {
 pub struct Constraint {
     name: String,
     column_name: String,
-    origin: String,
 }
 
 impl TableRow for Constraint {
     fn fields(&self) -> Vec<String> {
-        vec![
-            "name".to_string(),
-            "column_name".to_string(),
-            "origin".to_string(),
-        ]
+        vec!["name".to_string(), "column_name".to_string()]
     }
 
     fn columns(&self) -> Vec<String> {
-        vec![
-            self.name.to_string(),
-            self.column_name.to_string(),
-            self.origin.to_string(),
-        ]
+        vec![self.name.to_string(), self.column_name.to_string()]
     }
 }
 
@@ -89,6 +80,7 @@ impl TableRow for Column {
 }
 
 pub struct ForeignKey {
+    name: Option<String>,
     column_name: Option<String>,
     ref_table: Option<String>,
     ref_column: Option<String>,
@@ -97,6 +89,7 @@ pub struct ForeignKey {
 impl TableRow for ForeignKey {
     fn fields(&self) -> Vec<String> {
         vec![
+            "name".to_string(),
             "column_name".to_string(),
             "ref_table".to_string(),
             "ref_column".to_string(),
@@ -105,6 +98,9 @@ impl TableRow for ForeignKey {
 
     fn columns(&self) -> Vec<String> {
         vec![
+            self.name
+                .as_ref()
+                .map_or(String::new(), |name| name.to_string()),
             self.column_name
                 .as_ref()
                 .map_or(String::new(), |r#type| r#type.to_string()),
@@ -149,7 +145,7 @@ impl TableRow for Index {
 }
 
 #[async_trait]
-impl Pool for SqlitePool {
+impl Pool for MssqlPool {
     async fn execute(&self, query: &String) -> anyhow::Result<ExecuteResult> {
         let query = query.trim();
         if query.to_uppercase().starts_with("SELECT") {
@@ -192,12 +188,15 @@ impl Pool for SqlitePool {
     }
 
     async fn get_databases(&self) -> anyhow::Result<Vec<Database>> {
-        let databases = sqlx::query("SELECT name FROM pragma_database_list")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|table| table.get(0))
-            .collect::<Vec<String>>();
+        let databases = sqlx::query(
+            "SELECT NAME
+        FROM SYS.DATABASES",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|table| table.get(0))
+        .collect::<Vec<String>>();
         let mut list = vec![];
         for db in databases {
             list.push(Database::new(
@@ -208,41 +207,67 @@ impl Pool for SqlitePool {
         Ok(list)
     }
 
-    async fn get_tables(&self, _database: String) -> anyhow::Result<Vec<Child>> {
-        let mut rows =
-            sqlx::query("SELECT name FROM sqlite_master WHERE type = 'table'").fetch(&self.pool);
+    async fn get_tables(&self, database: String) -> anyhow::Result<Vec<Child>> {
+        let query = format!(
+            "
+            USE {database}
+            SELECT TABLE_NAME, TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_CATALOG = '{database}'
+            ",
+            database = database
+        );
+        let mut rows = sqlx::query(query.as_str()).fetch(&self.pool);
         let mut tables = Vec::new();
         while let Some(row) = rows.try_next().await? {
             tables.push(Table {
-                name: row.try_get("name")?,
+                name: row.try_get("TABLE_NAME")?,
                 create_time: None,
                 update_time: None,
                 engine: None,
-                schema: None,
+                schema: row.try_get("TABLE_SCHEMA")?,
             })
         }
-        Ok(tables.into_iter().map(|table| table.into()).collect())
+        let mut schemas = vec![];
+        for (key, group) in &tables
+            .iter()
+            .sorted_by(|a, b| Ord::cmp(&b.schema, &a.schema))
+            .group_by(|t| t.schema.as_ref())
+        {
+            if let Some(key) = key {
+                schemas.push(
+                    Schema {
+                        name: key.to_string(),
+                        tables: group.cloned().collect(),
+                    }
+                    .into(),
+                )
+            }
+        }
+        Ok(schemas)
     }
 
     async fn get_records(
         &self,
-        _database: &Database,
+        database: &Database,
         table: &Table,
         page: u16,
         filter: Option<String>,
     ) -> anyhow::Result<(Vec<String>, Vec<Vec<String>>)> {
-        let query = if let Some(filter) = filter {
+        let query = if let Some(filter) = filter.as_ref() {
             format!(
-                "SELECT * FROM `{table}` WHERE {filter} LIMIT {page}, {limit}",
+                r#"SELECT * FROM "{database}"."{table_schema}"."{table}" WHERE {filter} ORDER BY 1 OFFSET {page} ROWS FETCH NEXT {limit} ROWS ONLY"#,
+                database = database.name,
                 table = table.name,
                 filter = filter,
+                table_schema = table.schema.clone().unwrap_or_else(|| "dbo".to_string()),
                 page = page,
                 limit = RECORDS_LIMIT_PER_PAGE
             )
         } else {
             format!(
-                "SELECT * FROM `{}` LIMIT {page}, {limit}",
-                table.name,
+                r#"SELECT * FROM "{database}"."{table_schema}"."{table}" ORDER BY 1 OFFSET {page} ROWS FETCH NEXT {limit} ROWS ONLY"#,
+                database = database.name,
+                table = table.name,
+                table_schema = table.schema.clone().unwrap_or_else(|| "dbo".to_string()),
                 page = page,
                 limit = RECORDS_LIMIT_PER_PAGE
             )
@@ -267,23 +292,28 @@ impl Pool for SqlitePool {
 
     async fn get_columns(
         &self,
-        _database: &Database,
+        database: &Database,
         table: &Table,
     ) -> anyhow::Result<Vec<Box<dyn TableRow>>> {
-        let query = format!("SELECT * FROM pragma_table_info('{}');", table.name);
+        let query = format!(
+            "
+            USE {}
+            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = '{}' AND TABLE_SCHEMA = '{}'
+            ",
+            database.name,
+            table.name,
+            table.schema.clone().unwrap_or_else(|| "dbo".to_string())
+        );
         let mut rows = sqlx::query(query.as_str()).fetch(&self.pool);
         let mut columns: Vec<Box<dyn TableRow>> = vec![];
         while let Some(row) = rows.try_next().await? {
-            let null: Option<i16> = row.try_get("notnull")?;
             columns.push(Box::new(Column {
-                name: row.try_get("name")?,
-                r#type: row.try_get("type")?,
-                null: if matches!(null, Some(null) if null == 1) {
-                    Some("✔︎".to_string())
-                } else {
-                    Some("".to_string())
-                },
-                default: row.try_get("dflt_value")?,
+                name: row.try_get("COLUMN_NAME")?,
+                r#type: row.try_get("DATA_TYPE")?,
+                null: row.try_get("IS_NULLABLE")?,
+                default: row.try_get("COLUMN_DEFAULT")?,
                 comment: None,
             }))
         }
@@ -292,33 +322,34 @@ impl Pool for SqlitePool {
 
     async fn get_constraints(
         &self,
-        _database: &Database,
+        database: &Database,
         table: &Table,
     ) -> anyhow::Result<Vec<Box<dyn TableRow>>> {
-        let mut rows = sqlx::query(
+        let query = format!(
             "
+            USE {}
             SELECT
-                p.origin,
-                s.name AS index_name,
-                i.name AS column_name
+            TC.CONSTRAINT_NAME,
+            KCU.COLUMN_NAME
             FROM
-                sqlite_master s
-                JOIN pragma_index_list(s.tbl_name) p ON s.name = p.name,
-                pragma_index_info(s.name) i
+            INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
+            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KCU ON TC.CONSTRAINT_NAME = KCU.CONSTRAINT_NAME
+            AND TC.TABLE_SCHEMA = KCU.TABLE_SCHEMA
+            JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE AS CCU ON CCU.CONSTRAINT_NAME = TC.CONSTRAINT_NAME
+            AND CCU.TABLE_SCHEMA = TC.TABLE_SCHEMA
             WHERE
-                s.type = 'index'
-                AND tbl_name = ?
-                AND NOT p.origin = 'c'
+            NOT TC.CONSTRAINT_TYPE = 'FOREIGN KEY'
+            AND TC.TABLE_NAME = '{}'
             ",
-        )
-        .bind(&table.name)
-        .fetch(&self.pool);
+            database.name,
+            table.name
+        );
+        let mut rows = sqlx::query(query.as_str()).fetch(&self.pool);
         let mut constraints: Vec<Box<dyn TableRow>> = vec![];
         while let Some(row) = rows.try_next().await? {
             constraints.push(Box::new(Constraint {
-                name: row.try_get("index_name")?,
-                column_name: row.try_get("column_name")?,
-                origin: row.try_get("origin")?,
+                name: row.try_get("CONSTRAINT_NAME")?,
+                column_name: row.try_get("COLUMN_NAME")?,
             }))
         }
         Ok(constraints)
@@ -326,22 +357,38 @@ impl Pool for SqlitePool {
 
     async fn get_foreign_keys(
         &self,
-        _database: &Database,
+        database: &Database,
         table: &Table,
     ) -> anyhow::Result<Vec<Box<dyn TableRow>>> {
         let query = format!(
-            "SELECT p.`from`, p.`to`, p.`table` FROM pragma_foreign_key_list('{}') p",
-            &table.name
+            "
+            USE {}
+            SELECT
+            TC.CONSTRAINT_NAME,
+            KCU.COLUMN_NAME,
+            CCU.TABLE_NAME AS FOREIGN_TABLE_NAME,
+            CCU.COLUMN_NAME AS FOREIGN_COLUMN_NAME
+            FROM
+            INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
+            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KCU ON TC.CONSTRAINT_NAME = KCU.CONSTRAINT_NAME
+            AND TC.TABLE_SCHEMA = KCU.TABLE_SCHEMA
+            JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE AS CCU ON CCU.CONSTRAINT_NAME = TC.CONSTRAINT_NAME
+            AND CCU.TABLE_SCHEMA = TC.TABLE_SCHEMA
+            WHERE
+            TC.CONSTRAINT_TYPE = 'FOREIGN KEY'
+            AND TC.TABLE_NAME = '{}'
+        ",
+            database.name,
+            table.name
         );
-        let mut rows = sqlx::query(query.as_str())
-            .bind(&table.name)
-            .fetch(&self.pool);
+        let mut rows = sqlx::query(query.as_str()).fetch(&self.pool);
         let mut foreign_keys: Vec<Box<dyn TableRow>> = vec![];
         while let Some(row) = rows.try_next().await? {
             foreign_keys.push(Box::new(ForeignKey {
-                column_name: row.try_get("from")?,
-                ref_table: row.try_get("table")?,
-                ref_column: row.try_get("to")?,
+                name: row.try_get("CONSTRAINT_NAME")?,
+                column_name: row.try_get("COLUMN_NAME")?,
+                ref_table: row.try_get("FOREIGN_TABLE_NAME")?,
+                ref_column: row.try_get("FOREIGN_COLUMN_NAME")?,
             }))
         }
         Ok(foreign_keys)
@@ -349,30 +396,34 @@ impl Pool for SqlitePool {
 
     async fn get_indexes(
         &self,
-        _database: &Database,
+        database: &Database,
         table: &Table,
     ) -> anyhow::Result<Vec<Box<dyn TableRow>>> {
-        let mut rows = sqlx::query(
+        let query = format!(
             "
+            USE {}
             SELECT
-                m.name AS index_name,
-                p.*
-            FROM
-                sqlite_master m,
-                pragma_index_info(m.name) p
-            WHERE
-                m.type = 'index'
-                AND m.tbl_name = ?
+            ind.name AS INDEX_NAME,
+			col.name AS COLUMN_NAME,
+            ind.TYPE_DESC AS TYPE
+            FROM SYS.INDEXES ind
+			INNER JOIN 
+			sys.index_columns ic ON  ind.object_id = ic.object_id and ind.index_id = ic.index_id 
+			INNER JOIN 
+			sys.columns col ON ic.object_id = col.object_id and ic.column_id = col.column_id
+			INNER JOIN 
+			sys.tables t ON ind.object_id = t.object_id
+            WHERE t.name = '{}'
             ",
-        )
-        .bind(&table.name)
-        .fetch(&self.pool);
+            database.name, table.name
+        );
+        let mut rows = sqlx::query(query.as_str()).fetch(&self.pool);
         let mut foreign_keys: Vec<Box<dyn TableRow>> = vec![];
         while let Some(row) = rows.try_next().await? {
             foreign_keys.push(Box::new(Index {
-                name: row.try_get("index_name")?,
-                column_name: row.try_get("name")?,
-                r#type: Some(String::new()),
+                name: row.try_get("INDEX_NAME")?,
+                column_name: row.try_get("COLUMN_NAME")?,
+                r#type: row.try_get("TYPE")?,
             }))
         }
         Ok(foreign_keys)
@@ -383,16 +434,13 @@ impl Pool for SqlitePool {
     }
 }
 
-fn convert_column_value_to_string(
-    row: &SqliteRow,
-    column: &SqliteColumn,
-) -> anyhow::Result<String> {
+fn convert_column_value_to_string(row: &MssqlRow, column: &MssqlColumn) -> anyhow::Result<String> {
     let column_name = column.name();
     if let Ok(value) = row.try_get(column_name) {
         let value: Option<String> = value;
         Ok(value.unwrap_or_else(|| "NULL".to_string()))
     } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<&str> = value;
+        let value: Option<i8> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<i16> = value;
@@ -408,15 +456,6 @@ fn convert_column_value_to_string(
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<f64> = value;
-        Ok(get_or_null!(value))
-    } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<chrono::DateTime<chrono::Utc>> = value;
-        Ok(get_or_null!(value))
-    } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<chrono::DateTime<chrono::Local>> = value;
-        Ok(get_or_null!(value))
-    } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<NaiveDateTime> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<bool> = value;

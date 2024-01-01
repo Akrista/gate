@@ -1,7 +1,9 @@
+pub mod mssql;
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
+pub use mssql::MssqlPool;
 pub use mysql::MySqlPool;
 pub use postgres::PostgresPool;
 pub use sqlite::SqlitePool;
