@@ -468,16 +468,16 @@ fn convert_column_value_to_string(row: &MssqlRow, column: &MssqlColumn) -> anyho
         let value: Option<rust_decimal::Decimal> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<NaiveDate> = value;
-        Ok(get_or_null!(value))
-    } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<NaiveTime> = value;
+        let value: Option<chrono::DateTime<chrono::Utc>> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<NaiveDateTime> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
-        let value: Option<chrono::DateTime<chrono::Utc>> = value;
+        let value: Option<NaiveDate> = value;
+        Ok(get_or_null!(value))
+    } else if let Ok(value) = row.try_get(column_name) {
+        let value: Option<NaiveTime> = value;
         Ok(get_or_null!(value))
     } else if let Ok(value) = row.try_get(column_name) {
         let value: Option<serde_json::Value> = value;
