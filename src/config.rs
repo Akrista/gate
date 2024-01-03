@@ -340,7 +340,7 @@ pub fn get_app_config_path() -> anyhow::Result<std::path::PathBuf> {
     }
     .ok_or_else(|| anyhow::anyhow!("failed to find os config dir."))?;
 
-    path.push("gobang");
+    path.push("gate");
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }

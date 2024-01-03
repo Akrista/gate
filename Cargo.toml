@@ -1,12 +1,12 @@
 [package]
-name = "gobang"
-version = "0.1.0-alpha.5"
-authors = ["Takayuki Maeda <takoyaki0316@gmail.com>"]
-edition = "2018"
+name = "gate"
+version = "0.1.0-alpha.6"
+authors = ["Jorge Thomas <info@notakrista.com>"]
+edition = "2021"
 license = "MIT"
-homepage = "https://github.com/TaKO8Ki/gobang"
-repository = "https://github.com/TaKO8Ki/gobang"
-readme = "README.md"
+homepage = "https://github.com/akrisa/gate"
+repository = "https://github.com/akrista/gate"
+readme = ".github/README.md"
 description = "A cross-platform TUI database management tool written in Rust"
 exclude = ["resources/"]
 

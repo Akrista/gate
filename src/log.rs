@@ -56,7 +56,7 @@ impl std::str::FromStr for LogLevel {
 
 #[macro_export]
 macro_rules! outln {
-    ($config:ident#$level:path, $($expr:expr),+) => {{
+    ($config:ident #$level:path, $($expr:expr),+) => {{
         use $crate::log::LogLevel::*;
         writeln!($config.log_level.write(&$level), $($expr),+).expect("Can't write output");
     }}
@@ -73,7 +73,7 @@ macro_rules! debug {
                 .write(true)
                 .create(true)
                 .append(true)
-                .open("gobang.log")
+                .open("gate.log")
                 .unwrap();
             writeln!(file, $($expr),+).expect("Can't write output");
         }

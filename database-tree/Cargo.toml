@@ -1,11 +1,11 @@
 [package]
 name = "database-tree"
-version = "0.1.0-alpha.5"
-authors = ["Takayuki Maeda <takoyaki0316@gmail.com>"]
+version = "0.1.0-alpha.6"
+authors = ["Jorge Thomas <info@notakrista.com>"]
 edition = "2018"
 license = "MIT"
-homepage = "https://github.com/TaKO8Ki/gobang"
-repository = "https://github.com/TaKO8Ki/gobang"
+homepage = "https://github.com/akrista/gate"
+repository = "https://github.com/akrista/gate"
 readme = "README.md"
 description = "Database tree structure"
 
